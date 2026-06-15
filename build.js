@@ -4,9 +4,12 @@
 //
 // Requires Node 18+ (uses global fetch).  Run: node build.js
 //
-// To change which countries appear, edit DEFAULT_COUNTRIES below
-// (ISO 3166-1 alpha-2 codes), or override at runtime with env vars:
-//   COUNTRIES=PK,US,GB   MAX_CHANNELS=3000   node build.js
+// Env overrides:
+//   COUNTRIES=PK,US,GB        which countries to include
+//   MAX_CHANNELS=3000         cap total channels
+//   CHECK_STREAMS=0           skip the live dead-stream test (much faster build)
+//   CHECK_TIMEOUT_MS=8000     per-stream timeout
+//   CHECK_CONCURRENCY=40      how many streams to test at once
 
 const fs = require('fs');
 const path = require('path');
@@ -19,17 +22,19 @@ const ID_PREFIX = 'iptv-';
 const DEFAULT_COUNTRIES = ['US', 'CA', 'GB', 'AU', 'NZ', 'PK', 'IN', 'AE'];
 
 // Hide channels from certain countries within certain categories only.
-// Below: drop Indian channels from the News row, but keep them everywhere else.
-// A channel that exists ONLY in a hidden category is skipped entirely.
 const HIDE_IN_CATEGORY = {
-  news: ['IN'],   // category id -> country codes to exclude from that category
+  news: ['IN'],   // drop Indian channels from the News row, keep them elsewhere
 };
 
 const COUNTRIES = (process.env.COUNTRIES
   ? process.env.COUNTRIES.split(',')
   : DEFAULT_COUNTRIES
 ).map((s) => s.trim().toUpperCase()).filter(Boolean);
-const MAX_CHANNELS = parseInt(process.env.MAX_CHANNELS || '20000', 10);
+const MAX_CHANNELS = parseInt(process.env.MAX_CHANNELS || '5000', 10);
+
+const CHECK_STREAMS = process.env.CHECK_STREAMS !== '0';        // on by default
+const CHECK_TIMEOUT_MS = parseInt(process.env.CHECK_TIMEOUT_MS || '8000', 10);
+const CHECK_CONCURRENCY = parseInt(process.env.CHECK_CONCURRENCY || '40', 10);
 
 let fileCount = 0;
 
@@ -50,8 +55,45 @@ function writeJSON(relPath, data) {
   fileCount++;
 }
 
+// Probe a single stream URL. Returns true if it responds with a usable playlist.
+async function isStreamAlive(s) {
+  const headers = { 'User-Agent': s.user_agent || 'VLC/3.0.20 LibVLC/3.0.20' };
+  if (s.referrer) headers.Referer = s.referrer;
+  try {
+    const res = await fetch(s.url, {
+      method: 'GET',
+      headers,
+      redirect: 'follow',
+      signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
+    });
+    if (!res.ok) { try { await res.body?.cancel(); } catch {} return false; }
+    // For HLS, confirm the body is actually a playlist, not an error page.
+    if (/\.m3u8(\?|$)/i.test(s.url)) {
+      const text = await res.text();
+      return /#EXTM3U/.test(text);
+    }
+    try { await res.body?.cancel(); } catch {}
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Simple concurrency-limited map.
+async function pMap(items, fn, concurrency) {
+  const results = new Array(items.length);
+  let i = 0;
+  async function worker() {
+    while (i < items.length) {
+      const idx = i++;
+      results[idx] = await fn(items[idx], idx);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length || 1) }, worker));
+  return results;
+}
+
 async function main() {
-  // Start clean so removed channels don't linger between builds.
   fs.rmSync(OUT, { recursive: true, force: true });
   fs.mkdirSync(OUT, { recursive: true });
 
@@ -82,7 +124,7 @@ async function main() {
   let selected = channels.filter(
     (c) => streamsByChannel.has(c.id) && !c.is_nsfw && !c.closed
   );
-  console.log(`${selected.length} channels have playable streams`);
+  console.log(`${selected.length} channels have streams listed`);
 
   if (COUNTRIES.length) {
     selected = selected.filter((c) => COUNTRIES.includes((c.country || '').toUpperCase()));
@@ -95,21 +137,39 @@ async function main() {
     console.log(`capped to ${selected.length} channels (MAX_CHANNELS=${MAX_CHANNELS})`);
   }
 
+  // Keep only the streams that actually respond. Channels with none survive get dropped.
+  const liveStreamsByChannel = new Map();
+  if (CHECK_STREAMS) {
+    console.log(`Testing streams for ${selected.length} channels (timeout ${CHECK_TIMEOUT_MS}ms, concurrency ${CHECK_CONCURRENCY})…`);
+    let tested = 0;
+    const checked = await pMap(selected, async (c) => {
+      const candidates = streamsByChannel.get(c.id) || [];
+      const alive = [];
+      for (const s of candidates) {
+        if (await isStreamAlive(s)) alive.push(s);
+      }
+      if (++tested % 200 === 0) console.log(`  …tested ${tested}/${selected.length}`);
+      if (alive.length) { liveStreamsByChannel.set(c.id, alive); return c; }
+      return null;
+    }, CHECK_CONCURRENCY);
+    const before = selected.length;
+    selected = checked.filter(Boolean);
+    console.log(`Stream check: kept ${selected.length}, dropped ${before - selected.length} dead channels`);
+  } else {
+    for (const c of selected) liveStreamsByChannel.set(c.id, streamsByChannel.get(c.id) || []);
+  }
+
   const byCategory = new Map();
-  let skipped = 0;
+  let hiddenSkipped = 0;
 
   for (const c of selected) {
     const country = (c.country || '').toUpperCase();
     const rawCats = c.categories && c.categories.length ? c.categories : ['general'];
-
-    // Remove any categories where this country is hidden (e.g. IN in news).
     const cats = rawCats.filter((cat) => {
       const hidden = HIDE_IN_CATEGORY[cat];
       return !(hidden && hidden.includes(country));
     });
-
-    // If the channel only existed in hidden categories, skip it entirely.
-    if (cats.length === 0) { skipped++; continue; }
+    if (cats.length === 0) { hiddenSkipped++; continue; }
 
     const logo = logoByChannel.get(c.id) || null;
     const stremioId = ID_PREFIX + safeId(c.id);
@@ -124,7 +184,7 @@ async function main() {
       meta: { ...metaPreview, background: logo, genres, country: c.country },
     });
 
-    const channelStreams = streamsByChannel.get(c.id).map((s) => {
+    const channelStreams = (liveStreamsByChannel.get(c.id) || []).map((s) => {
       const headers = {};
       if (s.referrer) headers.Referer = s.referrer;
       if (s.user_agent) headers['User-Agent'] = s.user_agent;
@@ -145,7 +205,7 @@ async function main() {
     }
   }
 
-  if (skipped) console.log(`skipped ${skipped} channels (hidden category only, e.g. Indian news)`);
+  if (hiddenSkipped) console.log(`skipped ${hiddenSkipped} channels (hidden category only, e.g. Indian news)`);
 
   const catalogDefs = [];
   const sortedCats = [...byCategory.keys()].sort((a, b) =>
@@ -170,10 +230,9 @@ async function main() {
     behaviorHints: { configurable: false },
   });
 
-  // Critical: stop GitHub Pages from running the tree through Jekyll.
   fs.writeFileSync(path.join(OUT, '.nojekyll'), '');
 
-  console.log(`Done. ${byCategory.size} catalogs, ${fileCount} files written to ./public`);
+  console.log(`Done. ${selected.length - hiddenSkipped} channels, ${byCategory.size} catalogs, ${fileCount} files written to ./public`);
   if (fileCount > 6000) {
     console.warn(`WARNING: ${fileCount} files may be too many for GitHub Pages. Lower MAX_CHANNELS.`);
   }
