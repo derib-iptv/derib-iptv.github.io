@@ -1,6 +1,7 @@
 // build.js
 // Generates a STATIC Stremio addon (also installable in Nuvio) from the public
-// iptv-org API. Output is written to ./public, which you host on GitHub Pages.
+// iptv-org API, merged with the curated Free-TV playlist for better reliability.
+// Output is written to ./public, which you host on GitHub Pages.
 //
 // Requires Node 18+ (uses global fetch).  Run: node build.js
 //
@@ -10,11 +11,13 @@
 //   CHECK_STREAMS=0           skip the live dead-stream test (much faster build)
 //   CHECK_TIMEOUT_MS=8000     per-stream timeout
 //   CHECK_CONCURRENCY=40      how many streams to test at once
+//   USE_FREETV=0              don't merge in the Free-TV playlist
 
 const fs = require('fs');
 const path = require('path');
 
 const API = 'https://iptv-org.github.io/api';
+const FREETV_URL = 'https://raw.githubusercontent.com/Free-TV/IPTV/master/playlist.m3u8';
 const OUT = path.join(__dirname, 'public');
 const ID_PREFIX = 'iptv-';
 
@@ -32,9 +35,10 @@ const COUNTRIES = (process.env.COUNTRIES
 ).map((s) => s.trim().toUpperCase()).filter(Boolean);
 const MAX_CHANNELS = parseInt(process.env.MAX_CHANNELS || '5000', 10);
 
-const CHECK_STREAMS = process.env.CHECK_STREAMS !== '0';        // on by default
+const CHECK_STREAMS = process.env.CHECK_STREAMS !== '0';
 const CHECK_TIMEOUT_MS = parseInt(process.env.CHECK_TIMEOUT_MS || '8000', 10);
 const CHECK_CONCURRENCY = parseInt(process.env.CHECK_CONCURRENCY || '40', 10);
+const USE_FREETV = process.env.USE_FREETV !== '0';
 
 let fileCount = 0;
 
@@ -55,19 +59,56 @@ function writeJSON(relPath, data) {
   fileCount++;
 }
 
-// Probe a single stream URL. Returns true if it responds with a usable playlist.
+// --- Free-TV M3U parsing ---
+function parseM3U(text) {
+  const out = [];
+  let pending = null;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (line.startsWith('#EXTINF')) {
+      const attr = (k) => { const m = line.match(new RegExp(k + '="([^"]*)"')); return m ? m[1] : null; };
+      const name = line.includes(',') ? line.slice(line.indexOf(',') + 1).trim() : null;
+      pending = {
+        id: attr('tvg-id'),
+        name: attr('tvg-name') || name,
+        logo: attr('tvg-logo'),
+        country: ((attr('tvg-country') || '').split(';')[0].trim().toUpperCase()) || null,
+      };
+    } else if (line.startsWith('#')) {
+      continue;
+    } else if (pending) {
+      pending.url = line;
+      if (pending.id && pending.url) out.push(pending);
+      pending = null;
+    }
+  }
+  // de-dup by id, keep first
+  const seen = new Set();
+  return out.filter((e) => (seen.has(e.id) ? false : seen.add(e.id)));
+}
+
+async function fetchFreeTV() {
+  try {
+    const res = await fetch(FREETV_URL, { signal: AbortSignal.timeout(20000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return parseM3U(await res.text());
+  } catch (e) {
+    console.warn(`Free-TV fetch failed (${e.message}); continuing with iptv-org only.`);
+    return [];
+  }
+}
+
+// --- live stream check ---
 async function isStreamAlive(s) {
   const headers = { 'User-Agent': s.user_agent || 'VLC/3.0.20 LibVLC/3.0.20' };
   if (s.referrer) headers.Referer = s.referrer;
   try {
     const res = await fetch(s.url, {
-      method: 'GET',
-      headers,
-      redirect: 'follow',
+      method: 'GET', headers, redirect: 'follow',
       signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
     });
     if (!res.ok) { try { await res.body?.cancel(); } catch {} return false; }
-    // For HLS, confirm the body is actually a playlist, not an error page.
     if (/\.m3u8(\?|$)/i.test(s.url)) {
       const text = await res.text();
       return /#EXTM3U/.test(text);
@@ -79,7 +120,6 @@ async function isStreamAlive(s) {
   }
 }
 
-// Simple concurrency-limited map.
 async function pMap(items, fn, concurrency) {
   const results = new Array(items.length);
   let i = 0;
@@ -114,14 +154,46 @@ async function main() {
 
   const logoByChannel = new Map();
   for (const l of logos) {
-    if (l.channel && l.url && !logoByChannel.has(l.channel)) {
-      logoByChannel.set(l.channel, l.url);
-    }
+    if (l.channel && l.url && !logoByChannel.has(l.channel)) logoByChannel.set(l.channel, l.url);
   }
 
   const categoryName = new Map(categories.map((c) => [c.id, c.name]));
+  const channelById = new Map(channels.map((c) => [c.id, c]));
 
-  let selected = channels.filter(
+  // --- merge in Free-TV ---
+  const extraChannels = [];
+  if (USE_FREETV) {
+    const freetv = await fetchFreeTV();
+    console.log(`Free-TV: parsed ${freetv.length} channels`);
+    let injected = 0, added = 0;
+    for (const ft of freetv) {
+      const ftStream = { channel: ft.id, url: ft.url, _source: 'free-tv' };
+      const arr = streamsByChannel.get(ft.id) || [];
+      arr.unshift(ftStream);                       // prefer Free-TV's stream
+      streamsByChannel.set(ft.id, arr);
+      if (ft.logo && !logoByChannel.has(ft.id)) logoByChannel.set(ft.id, ft.logo);
+
+      if (channelById.has(ft.id)) {
+        injected++;                                // known channel: just better stream
+      } else if (ft.country) {
+        extraChannels.push({                       // Free-TV-only channel
+          id: ft.id, name: ft.name, country: ft.country,
+          categories: ['general'], is_nsfw: false,
+        });
+        added++;
+      }
+    }
+    console.log(`Free-TV: boosted ${injected} existing channels, added ${added} new ones`);
+  }
+
+  // de-dup streams per channel by url (Free-TV stays first)
+  for (const [id, arr] of streamsByChannel) {
+    const seen = new Set();
+    streamsByChannel.set(id, arr.filter((s) => (seen.has(s.url) ? false : seen.add(s.url))));
+  }
+
+  const allChannels = channels.concat(extraChannels);
+  let selected = allChannels.filter(
     (c) => streamsByChannel.has(c.id) && !c.is_nsfw && !c.closed
   );
   console.log(`${selected.length} channels have streams listed`);
@@ -137,15 +209,13 @@ async function main() {
     console.log(`capped to ${selected.length} channels (MAX_CHANNELS=${MAX_CHANNELS})`);
   }
 
-  // Keep only the streams that actually respond. Channels with none survive get dropped.
   const liveStreamsByChannel = new Map();
   if (CHECK_STREAMS) {
     console.log(`Testing streams for ${selected.length} channels (timeout ${CHECK_TIMEOUT_MS}ms, concurrency ${CHECK_CONCURRENCY})…`);
     let tested = 0;
     const checked = await pMap(selected, async (c) => {
-      const candidates = streamsByChannel.get(c.id) || [];
       const alive = [];
-      for (const s of candidates) {
+      for (const s of (streamsByChannel.get(c.id) || [])) {
         if (await isStreamAlive(s)) alive.push(s);
       }
       if (++tested % 200 === 0) console.log(`  …tested ${tested}/${selected.length}`);
@@ -189,7 +259,7 @@ async function main() {
       if (s.referrer) headers.Referer = s.referrer;
       if (s.user_agent) headers['User-Agent'] = s.user_agent;
       const stream = {
-        name: 'IPTV-org',
+        name: s._source === 'free-tv' ? 'Free-TV' : 'IPTV-org',
         title: s.quality ? `${c.name} • ${s.quality}` : c.name,
         url: s.url,
         behaviorHints: { notWebReady: true },
@@ -219,9 +289,9 @@ async function main() {
 
   writeJSON('manifest.json', {
     id: 'org.iptvorg.static',
-    version: '1.0.0',
-    name: 'IPTV-org',
-    description: 'Free-to-air channels indexed by the public iptv-org project.',
+    version: '1.1.0',
+    name: 'IPTV-org + Free-TV',
+    description: 'Free-to-air channels from the iptv-org project, merged with the curated Free-TV playlist.',
     logo: 'https://iptv-org.github.io/logo.png',
     resources: ['catalog', 'meta', 'stream'],
     types: ['tv'],
