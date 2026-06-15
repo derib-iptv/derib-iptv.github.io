@@ -22,7 +22,7 @@ const COUNTRIES = (process.env.COUNTRIES
   ? process.env.COUNTRIES.split(',')
   : DEFAULT_COUNTRIES
 ).map((s) => s.trim().toUpperCase()).filter(Boolean);
-const MAX_CHANNELS = parseInt(process.env.MAX_CHANNELS || '5000', 10);
+const MAX_CHANNELS = parseInt(process.env.MAX_CHANNELS || '8000', 10);
 
 let fileCount = 0;
 
