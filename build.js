@@ -32,13 +32,51 @@ const PRIORITY_CATEGORIES = ['sports', 'news', 'kids', 'animation', 'family'];
 // dedicated "World Cup" row. Use exact iptv-org channel IDs — find one by
 // searching the channel at https://iptv-org.github.io/ or in channels.json.
 // The build logs which IDs it actually matched so you can correct any typos.
-// Only free-to-air World Cup 2026 broadcasters in your regions are listed;
-// pay-TV markets (NZ, India, UAE) have no legitimate free channel to add.
+//
+// Verified against iptv-org/database channels.csv + iptv-org/iptv streams/*.m3u
+// on 2026-06-16. "has stream" = iptv-org currently lists a working stream URL
+// for that id; "no stream" = the id is real but iptv-org has no free stream
+// for it (usually because the broadcaster is pay-TV/cable-only). Entries with
+// "no stream" are still listed below — the build log will report them as
+// unmatched unless the Free-TV merge happens to supply one.
 const FORCE_INCLUDE = new Set([
-  'BBCOne.uk', 'BBCTwo.uk', 'ITV1.uk',     // UK — BBC & ITV, all matches free
-  'SBS.au', 'SBSViceland.au',              // Australia — SBS, all matches free
-  'FOX.us', 'Telemundo.us',                // USA — Fox & Telemundo (free OTA)
-  'CTV.ca',                                // Canada — CTV (free part; TSN is pay)
+  // GB — BBC & ITV, shared rights deal. Both have working streams.
+  'BBCOne.uk', 'BBCTwo.uk', 'ITV1.uk',
+
+  // US — Fox/FS1 (English), Telemundo/Universo (Spanish).
+  // 'FOX.us' is NOT a real iptv-org channel id (the Fox broadcast network has
+  // no public stream listed at all) — using Fox Sports 1 instead, which does
+  // have a stream. 'Telemundo.us' exists but has no stream entry; NBC
+  // Universo does.
+  'FoxSports1.us', 'NBCUniverso.us',
+
+  // CA — TSN (Bell Media, English) / RDS (French) / CTV.
+  // None of these ids currently have an iptv-org stream — TSN1-5.ca,
+  // RDS.ca, RDS2.ca, RDSInfo.ca and CTV.ca are all cable/pay-only with
+  // nothing in streams data. Kept so the build log flags them; if the
+  // Free-TV merge ever supplies a feed for one, it'll start showing up.
+  'CTV.ca', 'TSN1.ca', 'RDS.ca',
+
+  // AU — Optus Sport holds primary World Cup rights and is pay-only (no
+  // free stream exists for it in iptv-org). SBS/Network 10 had some FTA
+  // coverage historically, but as of 2026 none of SBS.au, SBSViceland.au,
+  // or 10.au have a stream in iptv-org either.
+  'SBS.au', 'SBSViceland.au', '10.au',
+
+  // NZ — Sky Sport (Sky New Zealand), pay-only. No free iptv-org stream
+  // for SkySport.nz / SkySport1-9.nz / SkySportPremierLeague.nz etc.
+  'SkySport1.nz',
+
+  // PK — PTV Sports, free-to-air state broadcaster. Has a working stream.
+  'PTVSports.pk',
+
+  // IN — Sony Sports Network (Sony Ten 1-4). All four have working streams
+  // (Ten5 does not).
+  'SonySportsTen1.in', 'SonySportsTen2.in', 'SonySportsTen3Hindi.in', 'SonySportsTen4.in',
+
+  // AE/MENA — beIN Sports, pay-only. No free iptv-org stream under either
+  // .qa (where beIN channels are registered) or .ae.
+  'beINSports1.qa',
 ]);
 const isForced = (c) => FORCE_INCLUDE.has(c.id);
 
