@@ -28,6 +28,11 @@ jobs:
         with:
           node-version: 20
       - name: Generate static addon
+        # Countries are set inside build.js (DEFAULT_COUNTRIES). To override
+        # without editing build.js, uncomment and edit the env block below.
+        # env:
+        #   COUNTRIES: "US,CA,GB,AU,NZ,PK,IN,AE"
+        #   MAX_CHANNELS: "5000"
         run: node build.js
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
