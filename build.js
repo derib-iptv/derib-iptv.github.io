@@ -4,10 +4,9 @@
 //
 // Requires Node 18+ (uses global fetch).  Run: node build.js
 //
-// Optional env vars:
-//   COUNTRIES=PK,US,GB   only include channels from these ISO country codes
-//   MAX_CHANNELS=2000    cap total channels (keeps the Pages site small enough
-//                        to publish reliably). Set to 0 for no cap (risky).
+// To change which countries appear, edit DEFAULT_COUNTRIES below
+// (ISO 3166-1 alpha-2 codes), or override at runtime with env vars:
+//   COUNTRIES=PK,US,GB   MAX_CHANNELS=3000   node build.js
 
 const fs = require('fs');
 const path = require('path');
@@ -16,9 +15,14 @@ const API = 'https://iptv-org.github.io/api';
 const OUT = path.join(__dirname, 'public');
 const ID_PREFIX = 'iptv-';
 
-const COUNTRIES = (process.env.COUNTRIES || '')
-  .split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
-const MAX_CHANNELS = parseInt(process.env.MAX_CHANNELS || '2000', 10);
+// US, Canada, UK, Australia, New Zealand, Pakistan, India, UAE
+const DEFAULT_COUNTRIES = ['US', 'CA', 'GB', 'AU', 'NZ', 'PK', 'IN', 'AE'];
+
+const COUNTRIES = (process.env.COUNTRIES
+  ? process.env.COUNTRIES.split(',')
+  : DEFAULT_COUNTRIES
+).map((s) => s.trim().toUpperCase()).filter(Boolean);
+const MAX_CHANNELS = parseInt(process.env.MAX_CHANNELS || '5000', 10);
 
 let fileCount = 0;
 
@@ -150,7 +154,7 @@ async function main() {
 
   console.log(`Done. ${selected.length} channels, ${catalogDefs.length} catalogs, ${fileCount} files written to ./public`);
   if (fileCount > 6000) {
-    console.warn(`WARNING: ${fileCount} files may be too many for GitHub Pages to publish reliably. Lower MAX_CHANNELS or set COUNTRIES.`);
+    console.warn(`WARNING: ${fileCount} files may be too many for GitHub Pages. Lower MAX_CHANNELS.`);
   }
 }
 
