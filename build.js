@@ -28,6 +28,20 @@ const DEFAULT_COUNTRIES = ['US', 'CA', 'GB', 'AU', 'NZ', 'PK', 'IN', 'AE'];
 // cap before anything else gets trimmed. Order here = order shown in the app.
 const PRIORITY_CATEGORIES = ['sports', 'news', 'kids', 'animation', 'family'];
 
+// Channels to ALWAYS include (bypass the cap), pin to the top, and surface in a
+// dedicated "World Cup" row. Use exact iptv-org channel IDs — find one by
+// searching the channel at https://iptv-org.github.io/ or in channels.json.
+// The build logs which IDs it actually matched so you can correct any typos.
+// Only free-to-air World Cup 2026 broadcasters in your regions are listed;
+// pay-TV markets (NZ, India, UAE) have no legitimate free channel to add.
+const FORCE_INCLUDE = new Set([
+  'BBCOne.uk', 'BBCTwo.uk', 'ITV1.uk',     // UK — BBC & ITV, all matches free
+  'SBS.au', 'SBSViceland.au',              // Australia — SBS, all matches free
+  'FOX.us', 'Telemundo.us',                // USA — Fox & Telemundo (free OTA)
+  'CTV.ca',                                // Canada — CTV (free part; TSN is pay)
+]);
+const isForced = (c) => FORCE_INCLUDE.has(c.id);
+
 // Hide channels from certain countries within certain categories only.
 const HIDE_IN_CATEGORY = {
   news: ['IN'],   // drop Indian channels from the News row, keep them elsewhere
@@ -208,8 +222,24 @@ async function main() {
     console.log(`${selected.length} after country filter (${COUNTRIES.join(', ')})`);
   }
 
-  // Priority categories survive the cap first, then alphabetical within each tier.
+  if (FORCE_INCLUDE.size) {
+    const have = new Set(selected.map((c) => c.id));
+    const found = [];
+    for (const c of allChannels) {
+      if (FORCE_INCLUDE.has(c.id) && streamsByChannel.has(c.id) && !c.is_nsfw && !c.closed) {
+        found.push(c.id);
+        if (!have.has(c.id)) selected.push(c);
+      }
+    }
+    const missing = [...FORCE_INCLUDE].filter((id) => !found.includes(id));
+    console.log(`World Cup force-include: matched ${found.length} (${found.join(', ') || 'none'})`);
+    if (missing.length) console.log(`  NOT found in iptv-org data — fix these IDs: ${missing.join(', ')}`);
+  }
+
+  // Force-included first, then priority categories, then alphabetical.
   selected.sort((a, b) => {
+    const fa = isForced(a), fb = isForced(b);
+    if (fa !== fb) return fa ? -1 : 1;
     const pa = isPriority(a), pb = isPriority(b);
     if (pa !== pb) return pa ? -1 : 1;
     return a.name.localeCompare(b.name);
@@ -230,6 +260,7 @@ async function main() {
       }
       if (++tested % 200 === 0) console.log(`  …tested ${tested}/${selected.length}`);
       if (alive.length) { liveStreamsByChannel.set(c.id, alive); return c; }
+      if (isForced(c)) { liveStreamsByChannel.set(c.id, streamsByChannel.get(c.id) || []); return c; }
       return null;
     }, CHECK_CONCURRENCY);
     const before = selected.length;
@@ -240,6 +271,7 @@ async function main() {
   }
 
   const byCategory = new Map();
+  const worldCupMetas = [];
   let hiddenSkipped = 0;
 
   for (const c of selected) {
@@ -259,6 +291,7 @@ async function main() {
       id: stremioId, type: 'tv', name: c.name,
       poster: logo, posterShape: 'square', logo,
     };
+    if (FORCE_INCLUDE.has(c.id)) worldCupMetas.push(metaPreview);
 
     writeJSON(`meta/tv/${stremioId}.json`, {
       meta: { ...metaPreview, background: logo, genres, country: c.country },
@@ -300,10 +333,14 @@ async function main() {
     writeJSON(`catalog/tv/${catalogId}.json`, { metas: byCategory.get(cat) });
     catalogDefs.push({ type: 'tv', id: catalogId, name: `IPTV · ${categoryName.get(cat) || cat}` });
   }
+  if (worldCupMetas.length) {
+    writeJSON('catalog/tv/iptv-worldcup.json', { metas: worldCupMetas });
+    catalogDefs.unshift({ type: 'tv', id: 'iptv-worldcup', name: '\u26bd World Cup' });
+  }
 
   writeJSON('manifest.json', {
     id: 'org.iptvorg.static',
-    version: '1.2.0',
+    version: '1.3.0',
     name: 'IPTV-org + Free-TV',
     description: 'Free-to-air channels from the iptv-org project, merged with the curated Free-TV playlist.',
     logo: 'https://iptv-org.github.io/logo.png',
