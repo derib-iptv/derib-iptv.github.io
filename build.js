@@ -57,6 +57,10 @@ const FORCE_INCLUDE = new Set([
   // Free-TV merge ever supplies a feed for one, it'll start showing up.
   'CTV.ca', 'TSN1.ca', 'RDS.ca',
 
+  // CA — CBC, English-language, both have working streams (unlike the
+  // TSN/RDS/CTV ids above).
+  'CBCTDT.ca', 'CBCNewsNetwork.ca',
+
   // AU — Optus Sport holds primary World Cup rights and is pay-only (no
   // free stream exists for it in iptv-org). SBS/Network 10 had some FTA
   // coverage historically, but as of 2026 none of SBS.au, SBSViceland.au,
