@@ -24,6 +24,10 @@ const ID_PREFIX = 'iptv-';
 // US, Canada, UK, Australia, New Zealand, Pakistan, India, UAE
 const DEFAULT_COUNTRIES = ['US', 'CA', 'GB', 'AU', 'NZ', 'PK', 'IN', 'AE'];
 
+// These category rows show first, AND their channels survive the MAX_CHANNELS
+// cap before anything else gets trimmed. Order here = order shown in the app.
+const PRIORITY_CATEGORIES = ['sports', 'news', 'kids', 'animation', 'family'];
+
 // Hide channels from certain countries within certain categories only.
 const HIDE_IN_CATEGORY = {
   news: ['IN'],   // drop Indian channels from the News row, keep them elsewhere
@@ -39,6 +43,8 @@ const CHECK_STREAMS = process.env.CHECK_STREAMS !== '0';
 const CHECK_TIMEOUT_MS = parseInt(process.env.CHECK_TIMEOUT_MS || '8000', 10);
 const CHECK_CONCURRENCY = parseInt(process.env.CHECK_CONCURRENCY || '40', 10);
 const USE_FREETV = process.env.USE_FREETV !== '0';
+
+const isPriority = (c) => (c.categories || []).some((cat) => PRIORITY_CATEGORIES.includes(cat));
 
 let fileCount = 0;
 
@@ -83,7 +89,6 @@ function parseM3U(text) {
       pending = null;
     }
   }
-  // de-dup by id, keep first
   const seen = new Set();
   return out.filter((e) => (seen.has(e.id) ? false : seen.add(e.id)));
 }
@@ -169,14 +174,14 @@ async function main() {
     for (const ft of freetv) {
       const ftStream = { channel: ft.id, url: ft.url, _source: 'free-tv' };
       const arr = streamsByChannel.get(ft.id) || [];
-      arr.unshift(ftStream);                       // prefer Free-TV's stream
+      arr.unshift(ftStream);
       streamsByChannel.set(ft.id, arr);
       if (ft.logo && !logoByChannel.has(ft.id)) logoByChannel.set(ft.id, ft.logo);
 
       if (channelById.has(ft.id)) {
-        injected++;                                // known channel: just better stream
+        injected++;
       } else if (ft.country) {
-        extraChannels.push({                       // Free-TV-only channel
+        extraChannels.push({
           id: ft.id, name: ft.name, country: ft.country,
           categories: ['general'], is_nsfw: false,
         });
@@ -203,10 +208,15 @@ async function main() {
     console.log(`${selected.length} after country filter (${COUNTRIES.join(', ')})`);
   }
 
-  selected.sort((a, b) => a.name.localeCompare(b.name));
+  // Priority categories survive the cap first, then alphabetical within each tier.
+  selected.sort((a, b) => {
+    const pa = isPriority(a), pb = isPriority(b);
+    if (pa !== pb) return pa ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
   if (MAX_CHANNELS > 0 && selected.length > MAX_CHANNELS) {
     selected = selected.slice(0, MAX_CHANNELS);
-    console.log(`capped to ${selected.length} channels (MAX_CHANNELS=${MAX_CHANNELS})`);
+    console.log(`capped to ${selected.length} channels (priority categories kept first)`);
   }
 
   const liveStreamsByChannel = new Map();
@@ -277,10 +287,14 @@ async function main() {
 
   if (hiddenSkipped) console.log(`skipped ${hiddenSkipped} channels (hidden category only, e.g. Indian news)`);
 
+  // Catalog row order: priority categories first (in listed order), then alphabetical.
   const catalogDefs = [];
-  const sortedCats = [...byCategory.keys()].sort((a, b) =>
-    (categoryName.get(a) || a).localeCompare(categoryName.get(b) || b)
-  );
+  const sortedCats = [...byCategory.keys()].sort((a, b) => {
+    const ia = PRIORITY_CATEGORIES.indexOf(a), ib = PRIORITY_CATEGORIES.indexOf(b);
+    const ra = ia === -1 ? 999 : ia, rb = ib === -1 ? 999 : ib;
+    if (ra !== rb) return ra - rb;
+    return (categoryName.get(a) || a).localeCompare(categoryName.get(b) || b);
+  });
   for (const cat of sortedCats) {
     const catalogId = 'iptv-' + safeId(cat);
     writeJSON(`catalog/tv/${catalogId}.json`, { metas: byCategory.get(cat) });
@@ -289,7 +303,7 @@ async function main() {
 
   writeJSON('manifest.json', {
     id: 'org.iptvorg.static',
-    version: '1.1.0',
+    version: '1.2.0',
     name: 'IPTV-org + Free-TV',
     description: 'Free-to-air channels from the iptv-org project, merged with the curated Free-TV playlist.',
     logo: 'https://iptv-org.github.io/logo.png',
