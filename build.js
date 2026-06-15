@@ -15,14 +15,21 @@ const API = 'https://iptv-org.github.io/api';
 const OUT = path.join(__dirname, 'public');
 const ID_PREFIX = 'iptv-';
 
-// US, Canada, UK, Australia, New Zealand, Pakistan, UAE  (India removed)
-const DEFAULT_COUNTRIES = ['US', 'CA', 'GB', 'AU', 'NZ', 'PK', 'AE'];
+// US, Canada, UK, Australia, New Zealand, Pakistan, India, UAE
+const DEFAULT_COUNTRIES = ['US', 'CA', 'GB', 'AU', 'NZ', 'PK', 'IN', 'AE'];
+
+// Hide channels from certain countries within certain categories only.
+// Below: drop Indian channels from the News row, but keep them everywhere else.
+// A channel that exists ONLY in a hidden category is skipped entirely.
+const HIDE_IN_CATEGORY = {
+  news: ['IN'],   // category id -> country codes to exclude from that category
+};
 
 const COUNTRIES = (process.env.COUNTRIES
   ? process.env.COUNTRIES.split(',')
   : DEFAULT_COUNTRIES
 ).map((s) => s.trim().toUpperCase()).filter(Boolean);
-const MAX_CHANNELS = parseInt(process.env.MAX_CHANNELS || '5000', 10);
+const MAX_CHANNELS = parseInt(process.env.MAX_CHANNELS || '20000', 10);
 
 let fileCount = 0;
 
@@ -89,11 +96,24 @@ async function main() {
   }
 
   const byCategory = new Map();
+  let skipped = 0;
 
   for (const c of selected) {
+    const country = (c.country || '').toUpperCase();
+    const rawCats = c.categories && c.categories.length ? c.categories : ['general'];
+
+    // Remove any categories where this country is hidden (e.g. IN in news).
+    const cats = rawCats.filter((cat) => {
+      const hidden = HIDE_IN_CATEGORY[cat];
+      return !(hidden && hidden.includes(country));
+    });
+
+    // If the channel only existed in hidden categories, skip it entirely.
+    if (cats.length === 0) { skipped++; continue; }
+
     const logo = logoByChannel.get(c.id) || null;
     const stremioId = ID_PREFIX + safeId(c.id);
-    const genres = (c.categories || []).map((id) => categoryName.get(id) || id);
+    const genres = cats.map((id) => categoryName.get(id) || id);
 
     const metaPreview = {
       id: stremioId, type: 'tv', name: c.name,
@@ -119,12 +139,13 @@ async function main() {
     });
     writeJSON(`stream/tv/${stremioId}.json`, { streams: channelStreams });
 
-    const cats = c.categories && c.categories.length ? c.categories : ['general'];
     for (const cat of cats) {
       if (!byCategory.has(cat)) byCategory.set(cat, []);
       byCategory.get(cat).push(metaPreview);
     }
   }
+
+  if (skipped) console.log(`skipped ${skipped} channels (hidden category only, e.g. Indian news)`);
 
   const catalogDefs = [];
   const sortedCats = [...byCategory.keys()].sort((a, b) =>
@@ -152,7 +173,7 @@ async function main() {
   // Critical: stop GitHub Pages from running the tree through Jekyll.
   fs.writeFileSync(path.join(OUT, '.nojekyll'), '');
 
-  console.log(`Done. ${selected.length} channels, ${catalogDefs.length} catalogs, ${fileCount} files written to ./public`);
+  console.log(`Done. ${byCategory.size} catalogs, ${fileCount} files written to ./public`);
   if (fileCount > 6000) {
     console.warn(`WARNING: ${fileCount} files may be too many for GitHub Pages. Lower MAX_CHANNELS.`);
   }
