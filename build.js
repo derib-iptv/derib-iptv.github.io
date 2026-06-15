@@ -15,14 +15,14 @@ const API = 'https://iptv-org.github.io/api';
 const OUT = path.join(__dirname, 'public');
 const ID_PREFIX = 'iptv-';
 
-// US, Canada, UK, Australia, New Zealand, Pakistan, India, UAE
-const DEFAULT_COUNTRIES = ['US', 'CA', 'GB', 'AU', 'NZ', 'PK', 'IN', 'AE'];
+// US, Canada, UK, Australia, New Zealand, Pakistan, UAE  (India removed)
+const DEFAULT_COUNTRIES = ['US', 'CA', 'GB', 'AU', 'NZ', 'PK', 'AE'];
 
 const COUNTRIES = (process.env.COUNTRIES
   ? process.env.COUNTRIES.split(',')
   : DEFAULT_COUNTRIES
 ).map((s) => s.trim().toUpperCase()).filter(Boolean);
-const MAX_CHANNELS = parseInt(process.env.MAX_CHANNELS || '8000', 10);
+const MAX_CHANNELS = parseInt(process.env.MAX_CHANNELS || '5000', 10);
 
 let fileCount = 0;
 
