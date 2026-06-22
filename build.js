@@ -89,6 +89,60 @@ const HIDE_IN_CATEGORY = {
   news: ['IN'],   // drop Indian channels from the News row, keep them elsewhere
 };
 
+// Country-specific catalog rows shown at the top of the addon.
+// Each produces a dedicated row sorted by PRIORITY_COUNTRY_CATS first.
+const COUNTRY_CATALOGS = [
+  { code: 'GB', flag: '\u{1F1EC}\u{1F1E7}', name: 'UK' },
+  { code: 'US', flag: '\u{1F1FA}\u{1F1F8}', name: 'USA' },
+  { code: 'PK', flag: '\u{1F1F5}\u{1F1F0}', name: 'Pakistan' },
+];
+const PRIORITY_COUNTRY_CATS = ['sports', 'entertainment', 'animation', 'kids', 'news', 'family'];
+
+// Whitelist for the global News catalog row — only these channel IDs appear there.
+// Everything else is excluded from news row but still shows in country/category rows.
+// Curated to major national broadcasters only; no regional fillers or obscure feeds.
+// IDs verified against iptv-org/database channels.csv — see comments for stream status.
+const TOP_NEWS_IDS = new Set([
+  // GB
+  'BBCNews.uk',          // BBC News Channel — has stream
+  'SkyNews.uk',          // Sky News — has stream
+  'ITVNews.uk',          // ITV News — check iptv-org, may be under ITV1.uk
+
+  // US
+  'CNN.us',              // CNN — has stream (geo-restricted but restreams exist)
+  'FoxNews.us',          // Fox News — has stream
+  'MSNBC.us',            // MSNBC — has stream
+  'ABCNews.us',          // ABC News — has stream
+  'CBSNews.us',          // CBS News — has stream
+
+  // PK
+  'GeoNews.pk',          // Geo News — has stream
+  'ARYNews.pk',          // ARY News — has stream
+  'DawnNews.pk',         // Dawn News — has stream
+  'SamaaNews.pk',        // Samaa TV — has stream
+  'BolNews.pk',          // Bol News — has stream
+  'ExpressNews.pk',      // Express News — has stream
+  'NewsOne.pk',          // News One — has stream
+
+  // International / multi-region
+  'AlJazeeraEnglish.qa', // Al Jazeera English — has stream
+  'BBCWorldNews.uk',     // BBC World News — has stream
+  'CNNInternational.us', // CNN International — has stream
+  'France24English.fr',  // France 24 English — has stream
+  'DWEnglish.de',        // Deutsche Welle English — has stream
+
+  // CA
+  'CBCNewsNetwork.ca',   // CBC News Network — in FORCE_INCLUDE, has stream
+
+  // AU
+  'ABCNews.au',          // ABC News Australia — has stream
+  'SkyNewsAustralia.au', // Sky News Australia — has stream
+]);
+
+// Within each country catalog row, cap how many channels per sub-category are shown.
+// This keeps the row focused — e.g. top 8 UK sports, not 40 regional variations.
+const MAX_PER_CAT_IN_COUNTRY = 8;
+
 const COUNTRIES = (process.env.COUNTRIES
   ? process.env.COUNTRIES.split(',')
   : DEFAULT_COUNTRIES
@@ -313,6 +367,7 @@ async function main() {
   }
 
   const byCategory = new Map();
+  const byCountry = new Map();   // country code -> sorted metaPreview[]
   const worldCupMetas = [];
   let hiddenSkipped = 0;
 
@@ -372,8 +427,16 @@ async function main() {
     writeJSON(`stream/tv/${stremioId}.json`, { streams: channelStreams });
 
     for (const cat of cats) {
+      // News row: only let whitelisted top channels through
+      if (cat === 'news' && !TOP_NEWS_IDS.has(c.id)) continue;
       if (!byCategory.has(cat)) byCategory.set(cat, []);
       byCategory.get(cat).push(metaPreview);
+    }
+
+    // Country catalogs: bucket into GB/US/PK rows
+    if (COUNTRY_CATALOGS.some((cc) => cc.code === country)) {
+      if (!byCountry.has(country)) byCountry.set(country, []);
+      byCountry.get(country).push({ meta: metaPreview, cats });
     }
   }
 
@@ -392,10 +455,47 @@ async function main() {
     writeJSON(`catalog/tv/${catalogId}.json`, { metas: byCategory.get(cat) });
     catalogDefs.push({ type: 'tv', id: catalogId, name: `IPTV · ${categoryName.get(cat) || cat}` });
   }
+  // Country-specific rows: GB, US, PK — sorted by priority sub-category,
+  // capped at MAX_PER_CAT_IN_COUNTRY channels per sub-category so the row
+  // shows the best of each genre rather than 40 regional BBC variants.
+  const countryCatalogDefs = [];
+  for (const { code, flag, name } of COUNTRY_CATALOGS) {
+    const entries = byCountry.get(code);
+    if (!entries || !entries.length) continue;
+
+    // Sort: priority sub-categories first, then alphabetical within each
+    entries.sort((a, b) => {
+      const ra = Math.min(...a.cats.map((c) => { const i = PRIORITY_COUNTRY_CATS.indexOf(c); return i === -1 ? 999 : i; }));
+      const rb = Math.min(...b.cats.map((c) => { const i = PRIORITY_COUNTRY_CATS.indexOf(c); return i === -1 ? 999 : i; }));
+      if (ra !== rb) return ra - rb;
+      return a.meta.name.localeCompare(b.meta.name);
+    });
+
+    // Cap per sub-category so each genre contributes at most MAX_PER_CAT_IN_COUNTRY slots.
+    // Forced (World Cup) channels are always kept regardless.
+    const catCount = new Map();
+    const capped = entries.filter(({ meta, cats: eCats }) => {
+      // Always keep FORCE_INCLUDE channels
+      const rawId = meta.id.replace(/^iptv-/, '');
+      if (FORCE_INCLUDE.has(rawId)) return true;
+      const topCat = eCats.find((c) => PRIORITY_COUNTRY_CATS.includes(c)) || eCats[0] || 'general';
+      const n = (catCount.get(topCat) || 0) + 1;
+      catCount.set(topCat, n);
+      return n <= MAX_PER_CAT_IN_COUNTRY;
+    });
+
+    const catalogId = `iptv-country-${code.toLowerCase()}`;
+    writeJSON(`catalog/tv/${catalogId}.json`, { metas: capped.map((e) => e.meta) });
+    countryCatalogDefs.push({ type: 'tv', id: catalogId, name: `${flag} ${name}` });
+    console.log(`Country catalog ${name}: ${capped.length} channels (from ${entries.length}, capped at ${MAX_PER_CAT_IN_COUNTRY}/sub-cat)`);
+  }
+
   if (worldCupMetas.length) {
     writeJSON('catalog/tv/iptv-worldcup.json', { metas: worldCupMetas });
     catalogDefs.unshift({ type: 'tv', id: 'iptv-worldcup', name: '\u26bd World Cup' });
   }
+  // Country rows go right after World Cup, before category rows
+  catalogDefs.unshift(...countryCatalogDefs.reverse());
 
   writeJSON('manifest.json', {
     id: 'org.iptvorg.static',
