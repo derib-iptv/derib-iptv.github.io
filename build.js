@@ -339,17 +339,33 @@ async function main() {
       meta: { ...metaPreview, background: logo, genres, country: c.country },
     });
 
-    const channelStreams = (liveStreamsByChannel.get(c.id) || []).map((s) => {
+    // Sort streams: header-free first so Nuvio/VLC (which ignore proxyHeaders)
+    // always attempt the most compatible stream before falling back to header-gated ones.
+    const sortedStreams = (liveStreamsByChannel.get(c.id) || []).slice().sort((a, b) => {
+      const aHasHeaders = !!(a.referrer || a.user_agent);
+      const bHasHeaders = !!(b.referrer || b.user_agent);
+      if (aHasHeaders !== bHasHeaders) return aHasHeaders ? 1 : -1; // header-free first
+      // Within same tier: Free-TV before iptv-org (Free-TV tends to be more open)
+      const aFree = a._source === 'free-tv', bFree = b._source === 'free-tv';
+      if (aFree !== bFree) return aFree ? -1 : 1;
+      return 0;
+    });
+
+    const channelStreams = sortedStreams.map((s) => {
       const headers = {};
       if (s.referrer) headers.Referer = s.referrer;
       if (s.user_agent) headers['User-Agent'] = s.user_agent;
+      const hasHeaders = Object.keys(headers).length > 0;
+      const sourceName = s._source === 'free-tv' ? 'Free-TV' : 'IPTV-org';
       const stream = {
-        name: s._source === 'free-tv' ? 'Free-TV' : 'IPTV-org',
+        // Append [H] to the name so users can see which streams need headers
+        // and are likely to fail on Nuvio/VLC without them.
+        name: hasHeaders ? `${sourceName} [H]` : sourceName,
         title: s.quality ? `${c.name} • ${s.quality}` : c.name,
         url: s.url,
         behaviorHints: { notWebReady: true },
       };
-      if (Object.keys(headers).length) stream.behaviorHints.proxyHeaders = { request: headers };
+      if (hasHeaders) stream.behaviorHints.proxyHeaders = { request: headers };
       return stream;
     });
     writeJSON(`stream/tv/${stremioId}.json`, { streams: channelStreams });
