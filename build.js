@@ -339,32 +339,33 @@ async function main() {
       meta: { ...metaPreview, background: logo, genres, country: c.country },
     });
 
-    // Sort streams: header-free first so Nuvio/VLC (which ignore proxyHeaders)
-    // always attempt the most compatible stream before falling back to header-gated ones.
-    const sortedStreams = (liveStreamsByChannel.get(c.id) || []).slice().sort((a, b) => {
-      const aHasHeaders = !!(a.referrer || a.user_agent);
-      const bHasHeaders = !!(b.referrer || b.user_agent);
-      if (aHasHeaders !== bHasHeaders) return aHasHeaders ? 1 : -1; // header-free first
-      // Within same tier: Free-TV before iptv-org (Free-TV tends to be more open)
-      const aFree = a._source === 'free-tv', bFree = b._source === 'free-tv';
-      if (aFree !== bFree) return aFree ? -1 : 1;
-      return 0;
-    });
-
-    const channelStreams = sortedStreams.map((s) => {
+    const channelStreams = (liveStreamsByChannel.get(c.id) || []).map((s) => {
       const headers = {};
       if (s.referrer) headers.Referer = s.referrer;
       if (s.user_agent) headers['User-Agent'] = s.user_agent;
       const hasHeaders = Object.keys(headers).length > 0;
+
+      // Bake headers into the URL using pipe syntax:
+      //   url|http-referrer=X&User-Agent=Y
+      // VLC, ExoPlayer, and most Android IPTV players parse this natively,
+      // so Nuvio/VLC get the headers even if they ignore proxyHeaders entirely.
+      // Stremio uses proxyHeaders (kept below) and ignores the pipe suffix.
+      let streamUrl = s.url;
+      if (hasHeaders) {
+        const parts = [];
+        if (s.referrer) parts.push(`http-referrer=${encodeURIComponent(s.referrer)}`);
+        if (s.user_agent) parts.push(`User-Agent=${encodeURIComponent(s.user_agent)}`);
+        streamUrl = `${s.url}|${parts.join('&')}`;
+      }
+
       const sourceName = s._source === 'free-tv' ? 'Free-TV' : 'IPTV-org';
       const stream = {
-        // Append [H] to the name so users can see which streams need headers
-        // and are likely to fail on Nuvio/VLC without them.
-        name: hasHeaders ? `${sourceName} [H]` : sourceName,
+        name: sourceName,
         title: s.quality ? `${c.name} • ${s.quality}` : c.name,
-        url: s.url,
+        url: streamUrl,
         behaviorHints: { notWebReady: true },
       };
+      // Keep proxyHeaders as well — Stremio uses this and ignores the pipe suffix.
       if (hasHeaders) stream.behaviorHints.proxyHeaders = { request: headers };
       return stream;
     });
